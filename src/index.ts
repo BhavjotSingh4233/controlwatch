@@ -1,19 +1,40 @@
 import { users } from "./data";
 import { checkPrivilegedMFA } from "./control";
 
-// This tells TypeScript that our Worker has access to:
-// 1. A D1 database
-// 2. An R2 evidence bucket
+
+// ---------------------------------------------------------
+// CLOUDFLARE ENVIRONMENT
+// ---------------------------------------------------------
+
 interface Env {
+
+	// D1 database for structured GRC records.
 	controlwatch_db: D1Database;
+
+	// R2 bucket for raw evidence.
 	controlwatch_evidence: R2Bucket;
+
+	// Cloudflare Workers AI.
+	AI: Ai;
 }
 
+
+// ---------------------------------------------------------
+// AI SUMMARY TYPE
+// ---------------------------------------------------------
+
+// This describes the structured object we want from Workers AI.
+interface AIRiskSummary {
+	riskSummary: string;
+	potentialImpact: string;
+	recommendedRemediation: string;
+}
+
+
 export default {
+
 	async fetch(request: Request, env: Env): Promise<Response> {
 
-		// Turn the incoming request into a URL object
-		// so we can inspect which path was requested.
 		const url = new URL(request.url);
 
 
@@ -22,6 +43,7 @@ export default {
 		// ---------------------------------------------------------
 
 		if (url.pathname === "/") {
+
 			return Response.json({
 				name: "ControlWatch",
 				description: "Automated GRC control monitoring",
@@ -34,6 +56,7 @@ export default {
 		// ---------------------------------------------------------
 
 		if (url.pathname === "/api/users") {
+
 			return Response.json(users);
 		}
 
@@ -44,24 +67,25 @@ export default {
 
 		if (url.pathname === "/api/assess/AC-001") {
 
-			// Run our security control.
+
+			// -----------------------------------------------------
+			// STEP 1: RUN DETERMINISTIC CONTROL
+			// -----------------------------------------------------
+
+			// Our TypeScript code decides PASS or FAIL.
 			//
-			// This checks whether every active admin
-			// has MFA enabled.
+			// AI does NOT make this decision.
 			const result = checkPrivilegedMFA();
 
 
-			// Record the exact time this assessment ran.
+			// Record when the assessment ran.
 			const assessedAt = new Date().toISOString();
 
 
 			// -----------------------------------------------------
-			// STEP 1: SAVE THE ASSESSMENT INTO D1
+			// STEP 2: CREATE ASSESSMENT IN D1
 			// -----------------------------------------------------
 
-			// At this point, we do NOT know the evidence key yet,
-			// because the evidence file name will include the
-			// assessment ID that D1 gives us.
 			const assessmentInsert = await env.controlwatch_db
 				.prepare(`
 					INSERT INTO assessments (
@@ -79,51 +103,56 @@ export default {
 				.run();
 
 
-			// Get the ID of the assessment row
-			// that was just created.
+			// Get the new assessment ID from D1.
 			const assessmentId =
 				assessmentInsert.meta.last_row_id;
 
 
 			// -----------------------------------------------------
-			// STEP 2: CREATE THE R2 EVIDENCE KEY
+			// STEP 3: CREATE EVIDENCE KEY
 			// -----------------------------------------------------
 
-			// Create a unique file path for this assessment.
-			//
 			// Example:
-			// AC-001/assessment-6.json
+			//
+			// AC-001/assessment-10.json
 			const evidenceKey =
 				`${result.controlId}/assessment-${assessmentId}.json`;
 
 
 			// -----------------------------------------------------
-			// STEP 3: BUILD THE RAW EVIDENCE OBJECT
+			// STEP 4: BUILD RAW EVIDENCE
 			// -----------------------------------------------------
 
-			// This is the exact data our control evaluated.
 			const evidence = {
+
 				controlId: result.controlId,
+
 				controlName: result.controlName,
+
 				assessmentId: assessmentId,
+
 				assessedAt: assessedAt,
+
 				source: "synthetic-identity-data",
+
 				users: users,
 			};
 
 
-			// Convert the JavaScript object into JSON text.
 			const evidenceJson =
 				JSON.stringify(evidence, null, 2);
 
 
 			// -----------------------------------------------------
-			// STEP 4: SAVE RAW EVIDENCE INTO R2
+			// STEP 5: SAVE RAW EVIDENCE INTO R2
 			// -----------------------------------------------------
 
 			await env.controlwatch_evidence.put(
+
 				evidenceKey,
+
 				evidenceJson,
+
 				{
 					httpMetadata: {
 						contentType: "application/json",
@@ -133,12 +162,9 @@ export default {
 
 
 			// -----------------------------------------------------
-			// STEP 5: LINK R2 EVIDENCE BACK TO D1
+			// STEP 6: LINK R2 EVIDENCE TO D1
 			// -----------------------------------------------------
 
-			// Now that we know the evidence key,
-			// update the assessment row so it points
-			// directly to the supporting R2 evidence file.
 			await env.controlwatch_db
 				.prepare(`
 					UPDATE assessments
@@ -153,11 +179,9 @@ export default {
 
 
 			// -----------------------------------------------------
-			// STEP 6: CREATE FINDINGS FOR FAILED USERS
+			// STEP 7: CREATE FINDINGS
 			// -----------------------------------------------------
 
-			// result.failures contains every user
-			// who violated AC-001.
 			for (const failure of result.failures) {
 
 				await env.controlwatch_db
@@ -173,22 +197,17 @@ export default {
 						VALUES (?, ?, ?, ?, ?, ?)
 					`)
 					.bind(
-						// Link this finding to the assessment.
+
 						assessmentId,
 
-						// Which control failed.
 						result.controlId,
 
-						// Demo severity.
 						"HIGH",
 
-						// Person who caused the failure.
 						failure.name,
 
-						// Human-readable description.
 						"Active privileged account does not have MFA enabled",
 
-						// Finding has not been resolved yet.
 						"OPEN"
 					)
 					.run();
@@ -196,17 +215,261 @@ export default {
 
 
 			// -----------------------------------------------------
-			// STEP 7: RETURN THE ASSESSMENT RESULT
+			// STEP 8: PREPARE INPUT FOR WORKERS AI
+			// -----------------------------------------------------
+
+			// Turn the actual failed users into JSON.
+			//
+			// This means Bob is NOT hard-coded into the AI logic.
+			const exceptionsForAI =
+				JSON.stringify(result.failures, null, 2);
+
+
+			// -----------------------------------------------------
+			// STEP 9: CALL WORKERS AI USING JSON MODE
+			// -----------------------------------------------------
+
+			let parsedAI: AIRiskSummary;
+
+
+			try {
+
+				const aiResponse = await env.AI.run(
+
+					"@cf/meta/llama-3.1-8b-instruct-fast",
+
+					{
+						// The model still needs instructions about
+						// what the data means.
+						messages: [
+							{
+								role: "system",
+								content:
+									"You are a security Governance, Risk, and Compliance analyst. Explain deterministic control results to nontechnical security leaders. Never change the provided PASS or FAIL result and never invent facts.",
+							},
+							{
+								role: "user",
+								content: `
+Analyze this already-completed security control assessment.
+
+Control ID:
+${result.controlId}
+
+Control Name:
+${result.controlName}
+
+Deterministic Result:
+${result.status}
+
+Actual Exceptions:
+${exceptionsForAI}
+
+Create a concise executive explanation.
+
+The risk summary should mention the actual affected person when applicable.
+The recommended remediation should directly address the identified exception.
+								`,
+							},
+						],
+
+
+						// -------------------------------------------------
+						// JSON MODE / STRUCTURED OUTPUT
+						// -------------------------------------------------
+
+						// Instead of asking the model to FORMAT JSON
+						// correctly using only prompt instructions,
+						// we give Workers AI an actual JSON schema.
+						//
+						// Cloudflare asks the model to return an object
+						// conforming to this structure.
+						response_format: {
+
+							type: "json_schema",
+
+							json_schema: {
+
+								type: "object",
+
+								properties: {
+
+									riskSummary: {
+										type: "string",
+									},
+
+									potentialImpact: {
+										type: "string",
+									},
+
+									recommendedRemediation: {
+										type: "string",
+									},
+								},
+
+								required: [
+									"riskSummary",
+									"potentialImpact",
+									"recommendedRemediation",
+								],
+
+								additionalProperties: false,
+							},
+						},
+					}
+				);
+
+
+				// -----------------------------------------------------
+				// STEP 10: READ STRUCTURED AI RESPONSE
+				// -----------------------------------------------------
+
+				// With JSON Mode, Cloudflare returns the structured
+				// result through "response".
+				const aiResult =
+					(aiResponse as any).response;
+
+
+				// Usually JSON Mode gives us an object directly.
+				//
+				// But we handle both possibilities:
+				//
+				// 1. response is already an object
+				// 2. response happens to come back as JSON text
+				if (typeof aiResult === "string") {
+
+					parsedAI =
+						JSON.parse(aiResult) as AIRiskSummary;
+
+				} else {
+
+					parsedAI =
+						aiResult as AIRiskSummary;
+				}
+
+
+				// -----------------------------------------------------
+				// STEP 11: VALIDATE REQUIRED FIELDS
+				// -----------------------------------------------------
+
+				// Even structured AI output should still be checked
+				// before we trust it.
+				if (
+					!parsedAI ||
+					!parsedAI.riskSummary ||
+					!parsedAI.potentialImpact ||
+					!parsedAI.recommendedRemediation
+				) {
+
+					throw new Error(
+						"Workers AI response was missing required fields"
+					);
+				}
+
+			} catch (error) {
+
+				// -----------------------------------------------------
+				// SAFE FALLBACK
+				// -----------------------------------------------------
+
+				// IMPORTANT:
+				//
+				// An AI failure does NOT change the actual
+				// security assessment.
+				//
+				// The deterministic result remains the source of truth.
+				console.error(
+					"Workers AI summary generation failed:",
+					error
+				);
+
+
+				parsedAI = {
+
+					riskSummary:
+						"AI risk summary could not be generated.",
+
+					potentialImpact:
+						"See the deterministic control result and supporting evidence.",
+
+					recommendedRemediation:
+						"Review and remediate the identified control exceptions.",
+				};
+			}
+
+
+			// -----------------------------------------------------
+			// STEP 12: CREATE SUMMARY TEXT FOR D1
+			// -----------------------------------------------------
+
+			// D1 currently has one TEXT column called "summary".
+			//
+			// So we'll save the structured fields as nicely
+			// formatted text.
+			const aiSummaryText = [
+
+				`Risk Summary: ${parsedAI.riskSummary}`,
+
+				`Potential Impact: ${parsedAI.potentialImpact}`,
+
+				`Recommended Remediation: ${parsedAI.recommendedRemediation}`,
+
+			].join("\n\n");
+
+
+			// -----------------------------------------------------
+			// STEP 13: SAVE AI SUMMARY INTO D1
+			// -----------------------------------------------------
+
+			await env.controlwatch_db
+				.prepare(`
+					UPDATE assessments
+					SET summary = ?
+					WHERE id = ?
+				`)
+				.bind(
+					aiSummaryText,
+					assessmentId
+				)
+				.run();
+
+
+			// -----------------------------------------------------
+			// STEP 14: RETURN COMPLETE ASSESSMENT
 			// -----------------------------------------------------
 
 			return Response.json({
+
+				// Deterministic result.
 				...result,
+
 				assessmentId: assessmentId,
+
 				assessedAt: assessedAt,
+
 				evidenceKey: evidenceKey,
+
+
+				// Structured AI explanation.
+				aiSummary: {
+
+					riskSummary:
+						parsedAI.riskSummary,
+
+					potentialImpact:
+						parsedAI.potentialImpact,
+
+					recommendedRemediation:
+						parsedAI.recommendedRemediation,
+				},
+
+
 				savedToDatabase: true,
+
 				savedEvidenceToR2: true,
+
 				evidenceLinkedToAssessment: true,
+
+				aiSummarySavedToDatabase: true,
 			});
 		}
 
@@ -225,7 +488,10 @@ export default {
 				`)
 				.all();
 
-			return Response.json(query.results);
+
+			return Response.json(
+				query.results
+			);
 		}
 
 
@@ -235,7 +501,6 @@ export default {
 
 		if (url.pathname === "/api/assessments") {
 
-			// Read the full assessment history from D1.
 			const query = await env.controlwatch_db
 				.prepare(`
 					SELECT *
@@ -244,7 +509,10 @@ export default {
 				`)
 				.all();
 
-			return Response.json(query.results);
+
+			return Response.json(
+				query.results
+			);
 		}
 
 
@@ -254,33 +522,29 @@ export default {
 
 		// Example:
 		//
-		// /api/evidence/AC-001/assessment-6.json
-		if (url.pathname.startsWith("/api/evidence/")) {
+		// /api/evidence/AC-001/assessment-10.json
+		if (
+			url.pathname.startsWith(
+				"/api/evidence/"
+			)
+		) {
 
-			// Remove "/api/evidence/" from the URL.
-			//
-			// Example:
-			//
-			// /api/evidence/AC-001/assessment-6.json
-			//
-			// becomes:
-			//
-			// AC-001/assessment-6.json
-			const evidenceKey = url.pathname.replace(
-				"/api/evidence/",
-				""
-			);
+			// Convert the API path into an R2 object key.
+			const evidenceKey =
+				url.pathname.replace(
+					"/api/evidence/",
+					""
+				);
 
 
-			// Ask R2 for that evidence file.
 			const object =
 				await env.controlwatch_evidence.get(
 					evidenceKey
 				);
 
 
-			// If it doesn't exist, return 404.
 			if (object === null) {
+
 				return Response.json(
 					{
 						error: "Evidence not found",
@@ -292,17 +556,16 @@ export default {
 			}
 
 
-			// Read the evidence file as text.
 			const evidenceText =
 				await object.text();
 
 
-			// Return the evidence JSON to the browser.
 			return new Response(
 				evidenceText,
 				{
 					headers: {
-						"Content-Type": "application/json",
+						"Content-Type":
+							"application/json",
 					},
 				}
 			);
@@ -310,7 +573,31 @@ export default {
 
 
 		// ---------------------------------------------------------
-		// ROUTE 7: NOT FOUND
+		// ROUTE 7: AI CONNECTION TEST
+		// ---------------------------------------------------------
+
+		if (url.pathname === "/api/ai-test") {
+
+			const aiResponse =
+				await env.AI.run(
+
+					"@cf/meta/llama-3.1-8b-instruct-fast",
+
+					{
+						prompt:
+							"Return exactly this sentence: Workers AI is connected to ControlWatch.",
+					}
+				);
+
+
+			return Response.json(
+				aiResponse
+			);
+		}
+
+
+		// ---------------------------------------------------------
+		// ROUTE 8: NOT FOUND
 		// ---------------------------------------------------------
 
 		return Response.json(

@@ -1,18 +1,11 @@
 -- This table stores every time we run a security control.
 CREATE TABLE assessments (
-
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
     control_id TEXT NOT NULL,
-
     status TEXT NOT NULL,
-
     assessed_at TEXT NOT NULL,
-
-    -- Path to the evidence file stored in R2.
-    -- Example:
-    -- AC-001/assessment-5.json
-    evidence_key TEXT
+    evidence_key TEXT,
+    summary TEXT
 );
 
 
