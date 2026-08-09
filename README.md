@@ -1,34 +1,39 @@
 # ControlWatch
 
-Automated security control monitoring built on Cloudflare.
+**Automated GRC Control Monitoring on Cloudflare**
 
-ControlWatch continuously evaluates identity-security controls using deterministic logic, stores assessment results and findings in D1, preserves raw evidence in R2, and uses Workers AI to generate concise risk explanations for security leaders.
+ControlWatch is a serverless security control monitoring platform that automatically evaluates identity-security controls, preserves assessment evidence, tracks risk findings, and generates AI-assisted risk analysis.
 
-> **Control determination is deterministic; AI is used only for interpretation.**
+> **Control determination is deterministic. AI is used only for interpretation.**
 >
 > ControlWatch never relies on an LLM to determine whether a security control passes or fails.
 
 ## Live Demo
 
-**ControlWatch:**  
-https://controlwatch.bhavjotsingh4233.workers.dev
+**https://controlwatch.bhavjotsingh4233.workers.dev**
+
+## Dashboard
+
+![ControlWatch Dashboard](screenshots/dashboard.png)
 
 ## Overview
 
-Traditional GRC control testing often involves manually collecting evidence, evaluating controls, documenting findings, and communicating risk.
+Traditional GRC control testing can involve manually collecting evidence, evaluating controls, documenting findings, and communicating risk.
 
-ControlWatch demonstrates how that workflow can be automated.
+ControlWatch demonstrates how that workflow can be automated using the Cloudflare developer platform.
 
-For every assessment, the application:
+For each assessment, ControlWatch:
 
 1. Collects synthetic identity-security data.
-2. Runs deterministic control logic.
+2. Evaluates the data using deterministic security control logic.
 3. Produces a `PASS`, `FAIL`, or `ERROR` result.
-4. Stores the assessment in Cloudflare D1.
-5. Stores raw supporting evidence in Cloudflare R2.
-6. Creates and risk-scores findings for detected exceptions.
-7. Uses Workers AI to translate structured findings into executive-friendly risk explanations.
-8. Displays the results through a lightweight monitoring dashboard.
+4. Stores assessment results and findings in Cloudflare D1.
+5. Preserves raw assessment evidence in Cloudflare R2.
+6. Calculates likelihood, impact, and risk scores for findings.
+7. Uses Cloudflare Workers AI to generate risk summaries and remediation guidance.
+8. Displays control health, evidence, findings, and risk through a monitoring dashboard.
+
+---
 
 ## Architecture
 
@@ -72,7 +77,7 @@ For every assessment, the application:
 ┌─────────────────┐   ┌──────────────────┐
 │ Cloudflare R2   │   │ Workers AI       │
 │                 │   │                  │
-│ Raw Evidence    │   │ Risk Summaries   │
+│ Raw Evidence    │   │ Risk Analysis    │
 └─────────────────┘   └──────────────────┘
           │                    │
           └─────────┬──────────┘
@@ -88,20 +93,22 @@ For every assessment, the application:
            └───────────────────┘
 ```
 
+---
+
 ## Cloudflare Stack
 
 ### Cloudflare Workers
 
-The Worker acts as the application's API and orchestration layer.
+Cloudflare Workers provide the application's API and orchestration layer.
 
-It:
+The Worker:
 
 - Executes security controls
 - Coordinates assessment workflows
 - Writes assessment data to D1
-- Stores evidence in R2
+- Stores raw evidence in R2
 - Invokes Workers AI
-- Exposes API endpoints to the dashboard
+- Serves API endpoints used by the dashboard
 
 ### Cloudflare D1
 
@@ -110,19 +117,21 @@ D1 provides the relational persistence layer for:
 - Assessment history
 - Control results
 - Findings
+- Severity
+- Likelihood and impact
 - Risk scores
 - Finding owners
 - Due dates
 - Remediation plans
 - Resolution status
 
-This allows ControlWatch to maintain historical assessment and finding data rather than simply returning one-time control results.
+This allows ControlWatch to maintain assessment history and track findings over time rather than returning only one-time control results.
 
 ### Cloudflare R2
 
-R2 stores the raw evidence associated with each assessment.
+R2 stores the raw evidence associated with assessments.
 
-Evidence objects use assessment-specific keys such as:
+Evidence is stored using assessment-specific object keys:
 
 ```text
 AC-001/assessment-25.json
@@ -130,45 +139,35 @@ AC-002/assessment-26.json
 AC-003/assessment-27.json
 ```
 
-This separates structured assessment metadata in D1 from the raw evidence supporting the assessment.
+This separates structured assessment metadata in D1 from the raw evidence supporting each assessment.
 
 ### Cloudflare Workers AI
 
-Workers AI generates concise explanations of deterministic security findings.
+Workers AI provides the interpretation layer for failed security controls.
 
-For a failed control, the model receives structured information including:
-
-- Control ID
-- Control requirement
-- Deterministic result
-- Detected exceptions
-- Risk score
-- Severity
-- Assigned remediation
-
-It returns:
+After the deterministic control engine produces a result, Workers AI receives structured information about the finding and generates:
 
 - Risk Summary
 - Potential Impact
 - Recommended Remediation
 
-Workers AI **does not determine whether a control passes or fails**.
+Workers AI does **not** determine whether a control passes or fails.
 
-This separation is intentional: conditions such as whether an administrator has MFA enabled are objectively measurable and should be evaluated with deterministic code.
+This separation is intentional. Conditions such as whether an active administrator has MFA enabled are objectively measurable and should be evaluated using deterministic code.
 
 AI is used downstream where natural-language interpretation is useful.
 
+---
+
 ## Security Controls
 
-ControlWatch currently implements three internal demo controls.
+ControlWatch currently implements three internal demonstration controls.
 
 ### AC-001 — Privileged Accounts Require MFA
 
-**Objective**
+**Objective:** All active privileged accounts must have multi-factor authentication enabled.
 
-All active privileged accounts must have multi-factor authentication enabled.
-
-Example failure:
+Example:
 
 ```text
 User: Bob
@@ -181,11 +180,9 @@ Result: FAIL
 
 ### AC-002 — Terminated Employees Must Not Retain Active Accounts
 
-**Objective**
+**Objective:** Accounts belonging to terminated employees must be deactivated.
 
-Accounts belonging to terminated employees must be deactivated.
-
-Example failure:
+Example:
 
 ```text
 User: Dave
@@ -197,11 +194,9 @@ Result: FAIL
 
 ### AC-003 — Privileged Access Reviews
 
-**Objective**
+**Objective:** Active privileged accounts must have an access review completed within the previous 90 days.
 
-Active privileged accounts must have an access review completed within the previous 90 days.
-
-Example failure:
+Example:
 
 ```text
 User: Bob
@@ -211,23 +206,37 @@ Last Access Review: More than 90 days ago
 Result: FAIL
 ```
 
-The `AC-001`, `AC-002`, and `AC-003` identifiers are internal ControlWatch identifiers for the demo rather than identifiers from a specific compliance framework.
+The `AC-001`, `AC-002`, and `AC-003` identifiers are internal ControlWatch identifiers created for this demonstration. They are not presented as control identifiers from a specific compliance framework.
 
-## Deterministic Assessment Engine
+---
 
-A major design principle of ControlWatch is separating **determination** from **interpretation**.
+## Deterministic Controls + AI Interpretation
 
-The control engine handles determination:
+A core design principle of ControlWatch is separating **determination** from **interpretation**.
+
+### Determination
 
 ```text
 Identity Data
      ↓
-Deterministic Rule
+Deterministic Control Logic
      ↓
 PASS / FAIL / ERROR
 ```
 
-Workers AI handles interpretation:
+For example:
+
+```text
+Active administrator
++
+MFA disabled
+=
+FAIL
+```
+
+No AI is required to make that decision.
+
+### Interpretation
 
 ```text
 Structured Finding
@@ -239,19 +248,9 @@ Potential Impact
 Recommended Remediation
 ```
 
-This prevents an LLM from changing an objectively measurable compliance result.
+This architecture prevents an LLM from changing or hallucinating an objectively measurable security-control result while still taking advantage of AI for communicating risk.
 
-For example:
-
-```text
-active administrator
-+
-MFA disabled
-=
-FAIL
-```
-
-That decision does not require AI.
+---
 
 ## PASS, FAIL, and ERROR
 
@@ -263,25 +262,29 @@ FAIL
 ERROR
 ```
 
-`PASS` means the available evidence satisfies the control.
+**PASS** — available evidence satisfies the control.
 
-`FAIL` means the evidence contains a deterministic control exception.
+**FAIL** — the evidence contains one or more deterministic control exceptions.
 
-`ERROR` represents an inability to complete the assessment, such as an evidence collection failure.
+**ERROR** — the system was unable to complete the assessment successfully.
 
-This distinction is important because a monitoring failure should not automatically imply that the underlying security control passed or failed.
+The distinction between `FAIL` and `ERROR` is important.
+
+If evidence collection fails, ControlWatch should not assume that the underlying security control passed or failed. Instead, the assessment can be represented as an error or inability to assess.
+
+---
 
 ## Risk Scoring
 
-Findings use a simple demonstration risk methodology:
+ControlWatch uses a simple demonstration risk model:
 
 ```text
 Risk Score = Likelihood × Impact
 ```
 
-Both likelihood and impact are scored from 1–5.
+Likelihood and impact are each scored from 1–5.
 
-For example:
+Example:
 
 ```text
 Likelihood: 4 / 5
@@ -291,11 +294,13 @@ Risk Score: 20 / 25
 Severity:   Critical
 ```
 
-The scoring model is a ControlWatch demo methodology and is not presented as Cloudflare's risk-scoring methodology.
+The scoring system is an internal ControlWatch demonstration methodology and is not presented as Cloudflare's risk-scoring methodology.
 
-## Finding and Remediation Tracking
+---
 
-Failed controls can produce findings containing:
+## Finding & Remediation Tracking
+
+Failed controls generate findings containing information such as:
 
 ```text
 Control
@@ -311,24 +316,30 @@ Remediation Plan
 Status
 ```
 
-For example:
+Example:
 
 ```text
 Control: AC-001
 Subject: Bob
-Severity: Critical
-Risk: 20 / 25
 
-Owner: Identity Security
+Issue:
+Active privileged account does not have MFA enabled.
+
+Severity: Critical
+Risk Score: 20 / 25
+
+Owner:
+Identity Security
 
 Remediation:
 Enable MFA for the affected privileged account and
-verify MFA enforcement for privileged users.
+verify MFA enforcement for all privileged users.
 
-Status: OPEN
+Status:
+OPEN
 ```
 
-This demonstrates a broader GRC lifecycle:
+This represents a simplified GRC lifecycle:
 
 ```text
 Control
@@ -348,9 +359,41 @@ Remediation
 Resolution
 ```
 
+---
+
+## Assessment Flow
+
+An AC-001 assessment follows this general flow:
+
+```text
+Run AC-001
+     ↓
+Worker loads identity data
+     ↓
+Control engine evaluates active privileged users
+     ↓
+Bob has MFA disabled
+     ↓
+AC-001 = FAIL
+     ↓
+Assessment saved to D1
+     ↓
+Raw evidence saved to R2
+     ↓
+Finding created or updated
+     ↓
+Risk score calculated
+     ↓
+Workers AI generates risk analysis
+     ↓
+Dashboard displays the result
+```
+
+---
+
 ## Dashboard
 
-The dashboard provides visibility into:
+The ControlWatch dashboard provides visibility into:
 
 - Overall control health
 - Passing and failing controls
@@ -363,35 +406,11 @@ The dashboard provides visibility into:
 - Remediation plans
 - Due dates
 - Assessment history
-- Raw R2 evidence
+- Raw assessment evidence
 
 The frontend intentionally uses lightweight HTML, CSS, and JavaScript rather than a large frontend framework.
 
-## Example Assessment Flow
-
-```text
-Run AC-001
-     ↓
-Worker loads identity data
-     ↓
-Control engine checks active privileged users
-     ↓
-Bob has MFA disabled
-     ↓
-AC-001 = FAIL
-     ↓
-Assessment saved to D1
-     ↓
-Raw evidence saved to R2
-     ↓
-Finding created / updated in D1
-     ↓
-Risk score calculated
-     ↓
-Workers AI generates risk explanation
-     ↓
-Dashboard displays assessment
-```
+---
 
 ## Project Structure
 
@@ -401,6 +420,9 @@ controlwatch/
 │   ├── index.html
 │   ├── app.js
 │   └── style.css
+│
+├── screenshots/
+│   └── dashboard.png
 │
 ├── src/
 │   ├── index.ts
@@ -413,37 +435,41 @@ controlwatch/
 └── README.md
 ```
 
+---
+
 ## Running Locally
 
-Install dependencies:
+### 1. Install dependencies
 
 ```bash
 npm install
 ```
 
-Generate Cloudflare binding types when needed:
+### 2. Generate Cloudflare binding types
 
 ```bash
 npx wrangler types
 ```
 
-Initialize the local D1 database:
+### 3. Initialize the local D1 database
 
 ```bash
 npx wrangler d1 execute controlwatch-db --local --file=./schema.sql
 ```
 
-Start the development server:
+### 4. Start the development server
 
 ```bash
 npm run dev
 ```
 
-Then open:
+The application will be available at:
 
 ```text
 http://localhost:8787
 ```
+
+---
 
 ## Deployment
 
@@ -453,13 +479,15 @@ Initialize the production D1 schema when setting up a new environment:
 npx wrangler d1 execute controlwatch-db --remote --file=./schema.sql
 ```
 
-Deploy the Worker:
+Deploy the application:
 
 ```bash
 npx wrangler deploy
 ```
 
-Wrangler deploys the Worker and static dashboard assets while connecting the application to its configured Cloudflare bindings.
+The deployed Worker connects to the configured production D1 database, R2 bucket, Workers AI binding, and static dashboard assets.
+
+---
 
 ## Tech Stack
 
@@ -473,28 +501,38 @@ Wrangler deploys the Worker and static dashboard assets while connecting the app
 - CSS
 - JavaScript
 
+---
+
 ## Key Design Decisions
 
-**Deterministic compliance decisions**
+### Deterministic compliance decisions
 
-AI never decides whether a control passes or fails.
+AI never decides whether a control passes or fails. Security conditions are evaluated using deterministic application logic.
 
-**Evidence separated from assessment metadata**
+### Evidence separated from assessment metadata
 
-D1 stores structured assessment and finding data while R2 stores raw supporting evidence.
+D1 stores structured assessment and finding information while R2 stores the raw evidence supporting each assessment.
 
-**AI as an interpretation layer**
+### AI as an interpretation layer
 
-Workers AI converts structured technical findings into language useful to security and risk stakeholders.
+Workers AI translates structured technical findings into concise risk explanations and remediation guidance.
 
-**Assessment failures are explicit**
+### Monitoring failures are explicit
 
-The architecture supports `ERROR` separately from `PASS` and `FAIL`, avoiding false conclusions when monitoring itself fails.
+The assessment model distinguishes `ERROR` from `PASS` and `FAIL`, preventing evidence-collection problems from being interpreted as security-control results.
 
-**Serverless architecture**
+### Serverless architecture
 
-The application uses Cloudflare's serverless platform for compute, relational storage, object storage, AI inference, and static asset delivery.
+ControlWatch uses Cloudflare's developer platform for compute, relational persistence, object storage, AI inference, and application delivery.
 
 ---
 
-Built as a demonstration of automated security control monitoring and GRC workflows using the Cloudflare developer platform.
+## What This Project Demonstrates
+
+ControlWatch demonstrates how serverless infrastructure and AI can be combined to automate part of the GRC control-monitoring lifecycle while keeping objective security decisions deterministic.
+
+The project integrates:
+
+**Cloudflare Workers → D1 → R2 → Workers AI → Dashboard**
+
+into a single deployed application for assessing controls, preserving evidence, identifying risk, and communicating findings.
