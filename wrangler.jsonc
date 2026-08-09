@@ -6,13 +6,26 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "controlwatch",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-08-09",
+	"compatibility_date": "2026-08-08",
 	"observability": {
 		"enabled": true
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "controlwatch_db",
+			"database_name": "controlwatch-db",
+			"database_id": "244397ae-bf86-46ce-a9dd-b02d87f04dbf"
+		}
+	],
+	"r2_buckets": [
+		{
+			"bucket_name": "controlwatch-evidence",
+			"binding": "controlwatch_evidence"
+		}
 	]
 	/**
 	 * Smart Placement
