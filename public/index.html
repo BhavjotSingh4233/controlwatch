@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+
+	<meta
+		name="viewport"
+		content="width=device-width, initial-scale=1.0"
+	>
+
+	<title>ControlWatch</title>
+
+	<link
+		rel="stylesheet"
+		href="/style.css"
+	>
+</head>
+
+
+<body>
+
+	<div class="container">
+
+
+		<!-- Header -->
+		<header>
+
+			<div>
+				<h1>ControlWatch</h1>
+
+				<p>
+					Automated GRC Control Monitoring
+				</p>
+			</div>
+
+
+			<button id="runAllButton">
+				Run All Controls
+			</button>
+
+		</header>
+
+
+		<div
+			id="statusMessage"
+			class="status-message"
+		></div>
+
+
+		<!-- Control Health -->
+		<section>
+
+			<h2>Control Health</h2>
+
+
+			<div class="metrics">
+
+				<div class="metric-card">
+					<span class="metric-label">
+						Controls
+					</span>
+
+					<span
+						id="controlCount"
+						class="metric-number"
+					>
+						3
+					</span>
+				</div>
+
+
+				<div class="metric-card">
+					<span class="metric-label">
+						Passing
+					</span>
+
+					<span
+						id="passingCount"
+						class="metric-number"
+					>
+						0
+					</span>
+				</div>
+
+
+				<div class="metric-card">
+					<span class="metric-label">
+						Failing
+					</span>
+
+					<span
+						id="failingCount"
+						class="metric-number"
+					>
+						0
+					</span>
+				</div>
+
+
+				<div class="metric-card">
+					<span class="metric-label">
+						Open Findings
+					</span>
+
+					<span
+						id="findingCount"
+						class="metric-number"
+					>
+						0
+					</span>
+				</div>
+
+			</div>
+
+		</section>
+
+
+		<!-- Risk Overview -->
+		<section>
+
+			<div class="section-heading">
+
+				<div>
+					<h2>Risk Overview</h2>
+
+					<p class="muted">
+						Risk scoring uses likelihood × impact on a 25-point scale.
+					</p>
+				</div>
+
+			</div>
+
+
+			<div class="metrics risk-metrics">
+
+				<div class="metric-card">
+
+					<span class="metric-label">
+						Critical Findings
+					</span>
+
+					<span
+						id="criticalCount"
+						class="metric-number"
+					>
+						0
+					</span>
+
+				</div>
+
+
+				<div class="metric-card">
+
+					<span class="metric-label">
+						High Findings
+					</span>
+
+					<span
+						id="highCount"
+						class="metric-number"
+					>
+						0
+					</span>
+
+				</div>
+
+
+				<div class="metric-card">
+
+					<span class="metric-label">
+						Highest Risk
+					</span>
+
+					<div>
+						<span
+							id="highestRisk"
+							class="metric-number"
+						>
+							0
+						</span>
+
+						<span class="metric-max">
+							/ 25
+						</span>
+					</div>
+
+				</div>
+
+			</div>
+
+		</section>
+
+
+		<!-- Controls -->
+		<section>
+
+			<div class="section-heading">
+
+				<div>
+					<h2>Controls</h2>
+
+					<p class="muted">
+						Latest assessment status for each monitored control.
+					</p>
+				</div>
+
+			</div>
+
+
+			<div id="controlsContainer">
+
+				<p class="muted">
+					Loading controls...
+				</p>
+
+			</div>
+
+		</section>
+
+
+		<!-- Open Findings -->
+		<section>
+
+			<div class="section-heading">
+
+				<div>
+					<h2>Open Findings</h2>
+
+					<p class="muted">
+						Active exceptions requiring remediation.
+					</p>
+				</div>
+
+			</div>
+
+
+			<div id="findingsList">
+
+				<p class="muted">
+					Loading findings...
+				</p>
+
+			</div>
+
+		</section>
+
+
+		<!-- Assessment History -->
+		<section>
+
+			<h2>Assessment History</h2>
+
+
+			<div class="table-wrapper">
+
+				<table>
+
+					<thead>
+
+						<tr>
+							<th>ID</th>
+							<th>Control</th>
+							<th>Status</th>
+							<th>Assessed</th>
+							<th>Evidence</th>
+						</tr>
+
+					</thead>
+
+
+					<tbody id="assessmentTableBody">
+
+						<tr>
+							<td colspan="5">
+								Loading assessments...
+							</td>
+						</tr>
+
+					</tbody>
+
+				</table>
+
+			</div>
+
+		</section>
+
+
+	</div>
+
+
+	<script src="/app.js"></script>
+
+</body>
+
+</html>

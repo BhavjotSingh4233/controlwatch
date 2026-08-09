@@ -1,29 +1,20 @@
 import { users } from "./data";
-import { checkPrivilegedMFA } from "./control";
+
+import {
+	checkPrivilegedMFA,
+	checkTerminatedAccounts,
+	checkPrivilegedAccessReviews,
+} from "./control";
 
 
-// ---------------------------------------------------------
-// CLOUDFLARE ENVIRONMENT
-// ---------------------------------------------------------
-
+// Cloudflare bindings.
 interface Env {
-
-	// D1 database for structured GRC records.
 	controlwatch_db: D1Database;
-
-	// R2 bucket for raw evidence.
 	controlwatch_evidence: R2Bucket;
-
-	// Cloudflare Workers AI.
 	AI: Ai;
 }
 
 
-// ---------------------------------------------------------
-// AI SUMMARY TYPE
-// ---------------------------------------------------------
-
-// This describes the structured object we want from Workers AI.
 interface AIRiskSummary {
 	riskSummary: string;
 	potentialImpact: string;
@@ -31,226 +22,529 @@ interface AIRiskSummary {
 }
 
 
-export default {
-
-	async fetch(request: Request, env: Env): Promise<Response> {
-
-		const url = new URL(request.url);
-
-
-		// ---------------------------------------------------------
-		// ROUTE 1: HOME
-		// ---------------------------------------------------------
-
-		if (url.pathname === "/") {
-
-			return Response.json({
-				name: "ControlWatch",
-				description: "Automated GRC control monitoring",
-			});
-		}
+interface ControlResult {
+	controlId: string;
+	controlName: string;
+	status: string;
+	failures: typeof users;
+}
 
 
-		// ---------------------------------------------------------
-		// ROUTE 2: SHOW USERS
-		// ---------------------------------------------------------
+// Configuration for each internal control.
+const controlDetails: Record<
+	string,
+	{
+		likelihood: number;
+		impact: number;
+		description: string;
+		owner: string;
+		remediation: string;
+	}
+> = {
 
-		if (url.pathname === "/api/users") {
+	"AC-001": {
+		likelihood: 4,
+		impact: 5,
 
-			return Response.json(users);
-		}
+		description:
+			"Active privileged account does not have MFA enabled",
 
+		owner:
+			"Identity Security",
 
-		// ---------------------------------------------------------
-		// ROUTE 3: RUN CONTROL AC-001
-		// ---------------------------------------------------------
-
-		if (url.pathname === "/api/assess/AC-001") {
-
-
-			// -----------------------------------------------------
-			// STEP 1: RUN DETERMINISTIC CONTROL
-			// -----------------------------------------------------
-
-			// Our TypeScript code decides PASS or FAIL.
-			//
-			// AI does NOT make this decision.
-			const result = checkPrivilegedMFA();
-
-
-			// Record when the assessment ran.
-			const assessedAt = new Date().toISOString();
+		remediation:
+			"Enable MFA for the affected privileged account and verify MFA enforcement for all privileged users.",
+	},
 
 
-			// -----------------------------------------------------
-			// STEP 2: CREATE ASSESSMENT IN D1
-			// -----------------------------------------------------
+	"AC-002": {
+		likelihood: 4,
+		impact: 5,
 
-			const assessmentInsert = await env.controlwatch_db
-				.prepare(`
-					INSERT INTO assessments (
-						control_id,
-						status,
-						assessed_at
-					)
-					VALUES (?, ?, ?)
-				`)
-				.bind(
-					result.controlId,
-					result.status,
-					assessedAt
-				)
-				.run();
+		description:
+			"Terminated employee still has an active account",
+
+		owner:
+			"IT Operations",
+
+		remediation:
+			"Disable the terminated employee account and verify the offboarding process removes access promptly.",
+	},
 
 
-			// Get the new assessment ID from D1.
-			const assessmentId =
-				assessmentInsert.meta.last_row_id;
+	"AC-003": {
+		likelihood: 3,
+		impact: 4,
+
+		description:
+			"Privileged account has not completed an access review within 90 days",
+
+		owner:
+			"Identity Governance",
+
+		remediation:
+			"Perform the overdue privileged access review and confirm the user's current access remains justified.",
+	},
+};
 
 
-			// -----------------------------------------------------
-			// STEP 3: CREATE EVIDENCE KEY
-			// -----------------------------------------------------
+// ---------------------------------------------------------
+// RISK HELPERS
+// ---------------------------------------------------------
 
-			// Example:
-			//
-			// AC-001/assessment-10.json
-			const evidenceKey =
-				`${result.controlId}/assessment-${assessmentId}.json`;
+function getSeverity(
+	riskScore: number
+): string {
 
+	if (riskScore >= 20) {
+		return "CRITICAL";
+	}
 
-			// -----------------------------------------------------
-			// STEP 4: BUILD RAW EVIDENCE
-			// -----------------------------------------------------
+	if (riskScore >= 12) {
+		return "HIGH";
+	}
 
-			const evidence = {
+	if (riskScore >= 6) {
+		return "MEDIUM";
+	}
 
-				controlId: result.controlId,
-
-				controlName: result.controlName,
-
-				assessmentId: assessmentId,
-
-				assessedAt: assessedAt,
-
-				source: "synthetic-identity-data",
-
-				users: users,
-			};
+	return "LOW";
+}
 
 
-			const evidenceJson =
-				JSON.stringify(evidence, null, 2);
+function calculateDueDate(
+	severity: string,
+	createdAt: string
+): string {
+
+	const daysBySeverity: Record<string, number> = {
+		CRITICAL: 3,
+		HIGH: 7,
+		MEDIUM: 14,
+		LOW: 30,
+	};
 
 
-			// -----------------------------------------------------
-			// STEP 5: SAVE RAW EVIDENCE INTO R2
-			// -----------------------------------------------------
+	const days =
+		daysBySeverity[severity] ?? 30;
 
-			await env.controlwatch_evidence.put(
 
-				evidenceKey,
+	const dueDate =
+		new Date(createdAt);
 
-				evidenceJson,
 
-				{
-					httpMetadata: {
-						contentType: "application/json",
-					},
-				}
+	dueDate.setUTCDate(
+		dueDate.getUTCDate() +
+		days
+	);
+
+
+	return dueDate.toISOString();
+}
+
+
+// ---------------------------------------------------------
+// AI INPUT
+// ---------------------------------------------------------
+
+function getAIExceptions(
+	result: ControlResult
+) {
+
+	switch (result.controlId) {
+
+		case "AC-001":
+
+			return result.failures.map(
+				(user) => ({
+					id: user.id,
+					name: user.name,
+					role: user.role,
+					active: user.active,
+					mfa: user.mfa,
+				})
 			);
 
 
-			// -----------------------------------------------------
-			// STEP 6: LINK R2 EVIDENCE TO D1
-			// -----------------------------------------------------
+		case "AC-002":
+
+			return result.failures.map(
+				(user) => ({
+					id: user.id,
+					name: user.name,
+					role: user.role,
+					active: user.active,
+					employmentStatus:
+						user.employmentStatus,
+				})
+			);
+
+
+		case "AC-003":
+
+			return result.failures.map(
+				(user) => ({
+					id: user.id,
+					name: user.name,
+					role: user.role,
+					active: user.active,
+					lastAccessReview:
+						user.lastAccessReview,
+				})
+			);
+
+
+		default:
+
+			return result.failures;
+	}
+}
+
+
+// ---------------------------------------------------------
+// SHARED ASSESSMENT PIPELINE
+// ---------------------------------------------------------
+
+async function processAssessment(
+	result: ControlResult,
+	env: Env
+): Promise<Response> {
+
+	const assessedAt =
+		new Date().toISOString();
+
+
+	// Create assessment record.
+	const assessmentInsert =
+		await env.controlwatch_db
+			.prepare(`
+				INSERT INTO assessments (
+					control_id,
+					status,
+					assessed_at
+				)
+				VALUES (?, ?, ?)
+			`)
+			.bind(
+				result.controlId,
+				result.status,
+				assessedAt
+			)
+			.run();
+
+
+	const assessmentId =
+		assessmentInsert.meta.last_row_id;
+
+
+	// ---------------------------------------------------------
+	// EVIDENCE
+	// ---------------------------------------------------------
+
+	const evidenceKey =
+		`${result.controlId}/assessment-${assessmentId}.json`;
+
+
+	const evidence = {
+
+		controlId:
+			result.controlId,
+
+		controlName:
+			result.controlName,
+
+		assessmentId,
+
+		assessedAt,
+
+		source:
+			"synthetic-identity-data",
+
+		users,
+	};
+
+
+	await env.controlwatch_evidence.put(
+
+		evidenceKey,
+
+		JSON.stringify(
+			evidence,
+			null,
+			2
+		),
+
+		{
+			httpMetadata: {
+				contentType:
+					"application/json",
+			},
+		}
+	);
+
+
+	await env.controlwatch_db
+		.prepare(`
+			UPDATE assessments
+			SET evidence_key = ?
+			WHERE id = ?
+		`)
+		.bind(
+			evidenceKey,
+			assessmentId
+		)
+		.run();
+
+
+	// ---------------------------------------------------------
+	// RISK
+	// ---------------------------------------------------------
+
+	const details =
+		controlDetails[
+			result.controlId
+		];
+
+
+	const likelihood =
+		details?.likelihood ?? 1;
+
+
+	const impact =
+		details?.impact ?? 1;
+
+
+	const riskScore =
+		likelihood * impact;
+
+
+	const severity =
+		getSeverity(
+			riskScore
+		);
+
+
+	const dueDate =
+		calculateDueDate(
+			severity,
+			assessedAt
+		);
+
+
+	// ---------------------------------------------------------
+	// FINDING LIFECYCLE
+	// ---------------------------------------------------------
+
+	for (const failure of result.failures) {
+
+		const existingFinding =
+			await env.controlwatch_db
+				.prepare(`
+					SELECT *
+					FROM findings
+					WHERE control_id = ?
+					AND subject = ?
+					AND status = 'OPEN'
+					LIMIT 1
+				`)
+				.bind(
+					result.controlId,
+					failure.name
+				)
+				.first();
+
+
+		if (!existingFinding) {
 
 			await env.controlwatch_db
 				.prepare(`
-					UPDATE assessments
-					SET evidence_key = ?
-					WHERE id = ?
+					INSERT INTO findings (
+						assessment_id,
+						control_id,
+						severity,
+						subject,
+						description,
+						status,
+						likelihood,
+						impact,
+						risk_score,
+						owner,
+						due_date,
+						remediation
+					)
+					VALUES (
+						?, ?, ?, ?, ?, ?,
+						?, ?, ?, ?, ?, ?
+					)
 				`)
 				.bind(
-					evidenceKey,
-					assessmentId
+					assessmentId,
+
+					result.controlId,
+
+					severity,
+
+					failure.name,
+
+					details?.description ??
+						"Security control exception detected",
+
+					"OPEN",
+
+					likelihood,
+
+					impact,
+
+					riskScore,
+
+					details?.owner ??
+						"Security",
+
+					dueDate,
+
+					details?.remediation ??
+						"Review and remediate the security control exception."
 				)
 				.run();
 
+		} else {
 
-			// -----------------------------------------------------
-			// STEP 7: CREATE FINDINGS
-			// -----------------------------------------------------
-
-			for (const failure of result.failures) {
-
-				await env.controlwatch_db
-					.prepare(`
-						INSERT INTO findings (
-							assessment_id,
-							control_id,
-							severity,
-							subject,
-							description,
-							status
+			// Keep current risk/remediation metadata without
+			// pushing the original deadline forward.
+			await env.controlwatch_db
+				.prepare(`
+					UPDATE findings
+					SET
+						severity = ?,
+						likelihood = ?,
+						impact = ?,
+						risk_score = ?,
+						owner = ?,
+						remediation = ?,
+						due_date = COALESCE(
+							due_date,
+							?
 						)
-						VALUES (?, ?, ?, ?, ?, ?)
-					`)
-					.bind(
+					WHERE id = ?
+				`)
+				.bind(
+					severity,
 
-						assessmentId,
+					likelihood,
 
-						result.controlId,
+					impact,
 
-						"HIGH",
+					riskScore,
 
-						failure.name,
+					details?.owner ??
+						"Security",
 
-						"Active privileged account does not have MFA enabled",
+					details?.remediation ??
+						"Review and remediate the security control exception.",
 
-						"OPEN"
-					)
-					.run();
-			}
+					dueDate,
 
-
-			// -----------------------------------------------------
-			// STEP 8: PREPARE INPUT FOR WORKERS AI
-			// -----------------------------------------------------
-
-			// Turn the actual failed users into JSON.
-			//
-			// This means Bob is NOT hard-coded into the AI logic.
-			const exceptionsForAI =
-				JSON.stringify(result.failures, null, 2);
+					(existingFinding as any)
+						.id
+				)
+				.run();
+		}
+	}
 
 
-			// -----------------------------------------------------
-			// STEP 9: CALL WORKERS AI USING JSON MODE
-			// -----------------------------------------------------
+	// Automatically resolve issues that disappear
+	// from a later deterministic assessment.
+	const openFindings =
+		await env.controlwatch_db
+			.prepare(`
+				SELECT *
+				FROM findings
+				WHERE control_id = ?
+				AND status = 'OPEN'
+			`)
+			.bind(
+				result.controlId
+			)
+			.all();
 
-			let parsedAI: AIRiskSummary;
+
+	for (
+		const finding
+		of openFindings.results as any[]
+	) {
+
+		const stillFailing =
+			result.failures.some(
+				(failure) =>
+					failure.name ===
+					finding.subject
+			);
 
 
-			try {
+		if (!stillFailing) {
 
-				const aiResponse = await env.AI.run(
+			await env.controlwatch_db
+				.prepare(`
+					UPDATE findings
+					SET
+						status = 'RESOLVED',
+						resolved_at = ?
+					WHERE id = ?
+				`)
+				.bind(
+					assessedAt,
+					finding.id
+				)
+				.run();
+		}
+	}
 
-					"@cf/meta/llama-3.1-8b-instruct-fast",
 
-					{
-						// The model still needs instructions about
-						// what the data means.
-						messages: [
-							{
-								role: "system",
-								content:
-									"You are a security Governance, Risk, and Compliance analyst. Explain deterministic control results to nontechnical security leaders. Never change the provided PASS or FAIL result and never invent facts.",
-							},
-							{
-								role: "user",
-								content: `
-Analyze this already-completed security control assessment.
+	// ---------------------------------------------------------
+	// WORKERS AI
+	// ---------------------------------------------------------
+
+	const aiExceptions =
+		getAIExceptions(
+			result
+		);
+
+
+	const exceptionsForAI =
+		JSON.stringify(
+			aiExceptions,
+			null,
+			2
+		);
+
+
+	let parsedAI: AIRiskSummary;
+
+
+	try {
+
+		const aiResponse =
+			await env.AI.run(
+
+				"@cf/meta/llama-3.1-8b-instruct-fast",
+
+				{
+					messages: [
+
+						{
+							role:
+								"system",
+
+							content:
+								"You are a security Governance, Risk, and Compliance analyst. Explain deterministic security-control results to nontechnical security leaders. Never change the supplied PASS or FAIL result and never invent facts.",
+						},
+
+						{
+							role:
+								"user",
+
+							content: `
+Analyze this completed security control assessment.
 
 Control ID:
 ${result.controlId}
@@ -261,232 +555,439 @@ ${result.controlName}
 Deterministic Result:
 ${result.status}
 
-Actual Exceptions:
+Exceptions:
 ${exceptionsForAI}
+
+Risk Methodology:
+Likelihood: ${likelihood}/5
+Impact: ${impact}/5
+Risk Score: ${riskScore}/25
+Severity: ${severity}
+
+Assigned Owner:
+${details?.owner ?? "Security"}
+
+Defined Remediation:
+${details?.remediation ?? "Review the finding."}
 
 Create a concise executive explanation.
 
-The risk summary should mention the actual affected person when applicable.
-The recommended remediation should directly address the identified exception.
-								`,
-							},
-						],
+Requirements:
+- riskSummary must be one complete sentence describing the security risk.
+- potentialImpact must be one complete sentence describing what could happen if the issue is exploited or remains unresolved.
+- recommendedRemediation must be one complete sentence describing the specific action required to resolve the current exception.
+- Reference affected users when appropriate.
+- Only discuss information relevant to this control.
+- Do not introduce unrelated security issues.
+- Do not return a severity label by itself as potentialImpact.
+- If a requirement is already overdue, remediation must address it immediately.
+- Keep each field under 30 words.
+							`,
+						},
+					],
 
 
-						// -------------------------------------------------
-						// JSON MODE / STRUCTURED OUTPUT
-						// -------------------------------------------------
+					response_format: {
 
-						// Instead of asking the model to FORMAT JSON
-						// correctly using only prompt instructions,
-						// we give Workers AI an actual JSON schema.
-						//
-						// Cloudflare asks the model to return an object
-						// conforming to this structure.
-						response_format: {
+						type:
+							"json_schema",
 
-							type: "json_schema",
+						json_schema: {
 
-							json_schema: {
+							type:
+								"object",
 
-								type: "object",
+							properties: {
 
-								properties: {
-
-									riskSummary: {
-										type: "string",
-									},
-
-									potentialImpact: {
-										type: "string",
-									},
-
-									recommendedRemediation: {
-										type: "string",
-									},
+								riskSummary: {
+									type:
+										"string",
 								},
 
-								required: [
-									"riskSummary",
-									"potentialImpact",
-									"recommendedRemediation",
-								],
+								potentialImpact: {
+									type:
+										"string",
+								},
 
-								additionalProperties: false,
+								recommendedRemediation: {
+									type:
+										"string",
+								},
 							},
+
+							required: [
+								"riskSummary",
+								"potentialImpact",
+								"recommendedRemediation",
+							],
+
+							additionalProperties:
+								false,
 						},
+					},
+				}
+			);
+
+
+		const aiResult =
+			(aiResponse as any)
+				.response;
+
+
+		if (
+			typeof aiResult ===
+			"string"
+		) {
+
+			parsedAI =
+				JSON.parse(
+					aiResult
+				) as AIRiskSummary;
+
+		} else {
+
+			parsedAI =
+				aiResult as AIRiskSummary;
+		}
+
+
+		if (
+			!parsedAI ||
+			!parsedAI.riskSummary ||
+			!parsedAI.potentialImpact ||
+			!parsedAI.recommendedRemediation
+		) {
+
+			throw new Error(
+				"Incomplete Workers AI response"
+			);
+		}
+
+	} catch (error) {
+
+		console.error(
+			"Workers AI summary generation failed:",
+			error
+		);
+
+
+		parsedAI = {
+
+			riskSummary:
+				"AI risk summary could not be generated.",
+
+			potentialImpact:
+				"See the deterministic control result and supporting evidence.",
+
+			recommendedRemediation:
+				"Review and remediate the identified control exceptions.",
+		};
+	}
+
+
+	const aiSummaryText = [
+
+		`Risk Summary: ${parsedAI.riskSummary}`,
+
+		`Potential Impact: ${parsedAI.potentialImpact}`,
+
+		`Recommended Remediation: ${parsedAI.recommendedRemediation}`,
+
+	].join("\n\n");
+
+
+	await env.controlwatch_db
+		.prepare(`
+			UPDATE assessments
+			SET summary = ?
+			WHERE id = ?
+		`)
+		.bind(
+			aiSummaryText,
+			assessmentId
+		)
+		.run();
+
+
+	return Response.json({
+
+		...result,
+
+		assessmentId,
+
+		assessedAt,
+
+		evidenceKey,
+
+		risk: {
+			likelihood,
+			impact,
+			score:
+				riskScore,
+			maxScore:
+				25,
+			severity,
+		},
+
+		remediationTracking: {
+
+			owner:
+				details?.owner ??
+				"Security",
+
+			dueDate,
+
+			remediation:
+				details?.remediation ??
+				"Review and remediate the security control exception.",
+		},
+
+		aiSummary: {
+
+			riskSummary:
+				parsedAI.riskSummary,
+
+			potentialImpact:
+				parsedAI.potentialImpact,
+
+			recommendedRemediation:
+				parsedAI.recommendedRemediation,
+		},
+
+		savedToDatabase:
+			true,
+
+		savedEvidenceToR2:
+			true,
+
+		evidenceLinkedToAssessment:
+			true,
+
+		aiSummarySavedToDatabase:
+			true,
+	});
+}
+
+
+// ---------------------------------------------------------
+// WORKER ROUTES
+// ---------------------------------------------------------
+
+export default {
+
+	async fetch(
+		request: Request,
+		env: Env
+	): Promise<Response> {
+
+		const url =
+			new URL(
+				request.url
+			);
+
+
+		if (
+			url.pathname === "/"
+		) {
+
+			return Response.json({
+				name:
+					"ControlWatch",
+
+				description:
+					"Automated GRC control monitoring",
+			});
+		}
+
+
+		if (
+			url.pathname ===
+			"/api/users"
+		) {
+
+			return Response.json(
+				users
+			);
+		}
+
+
+		// AC-001
+		if (
+			url.pathname ===
+			"/api/assess/AC-001"
+		) {
+
+			return processAssessment(
+				checkPrivilegedMFA(),
+				env
+			);
+		}
+
+
+		// AC-002
+		if (
+			url.pathname ===
+			"/api/assess/AC-002"
+		) {
+
+			return processAssessment(
+				checkTerminatedAccounts(),
+				env
+			);
+		}
+
+
+		// AC-003
+		if (
+			url.pathname ===
+			"/api/assess/AC-003"
+		) {
+
+			return processAssessment(
+				checkPrivilegedAccessReviews(),
+				env
+			);
+		}
+
+
+		// ---------------------------------------------------------
+		// FINDINGS
+		// ---------------------------------------------------------
+
+		if (
+			url.pathname ===
+			"/api/findings"
+		) {
+
+			const query =
+				await env.controlwatch_db
+					.prepare(`
+						SELECT *
+						FROM findings
+						ORDER BY id DESC
+					`)
+					.all();
+
+
+			return Response.json(
+				query.results
+			);
+		}
+
+
+		// ---------------------------------------------------------
+		// RESOLVE FINDING
+		// ---------------------------------------------------------
+
+		// Example:
+		// POST /api/findings/14/resolve
+		const resolveMatch =
+			url.pathname.match(
+				/^\/api\/findings\/(\d+)\/resolve$/
+			);
+
+
+		if (
+			resolveMatch &&
+			request.method === "POST"
+		) {
+
+			const findingId =
+				Number(
+					resolveMatch[1]
+				);
+
+
+			const finding =
+				await env.controlwatch_db
+					.prepare(`
+						SELECT *
+						FROM findings
+						WHERE id = ?
+					`)
+					.bind(
+						findingId
+					)
+					.first();
+
+
+			if (!finding) {
+
+				return Response.json(
+					{
+						error:
+							"Finding not found",
+					},
+					{
+						status: 404,
 					}
 				);
-
-
-				// -----------------------------------------------------
-				// STEP 10: READ STRUCTURED AI RESPONSE
-				// -----------------------------------------------------
-
-				// With JSON Mode, Cloudflare returns the structured
-				// result through "response".
-				const aiResult =
-					(aiResponse as any).response;
-
-
-				// Usually JSON Mode gives us an object directly.
-				//
-				// But we handle both possibilities:
-				//
-				// 1. response is already an object
-				// 2. response happens to come back as JSON text
-				if (typeof aiResult === "string") {
-
-					parsedAI =
-						JSON.parse(aiResult) as AIRiskSummary;
-
-				} else {
-
-					parsedAI =
-						aiResult as AIRiskSummary;
-				}
-
-
-				// -----------------------------------------------------
-				// STEP 11: VALIDATE REQUIRED FIELDS
-				// -----------------------------------------------------
-
-				// Even structured AI output should still be checked
-				// before we trust it.
-				if (
-					!parsedAI ||
-					!parsedAI.riskSummary ||
-					!parsedAI.potentialImpact ||
-					!parsedAI.recommendedRemediation
-				) {
-
-					throw new Error(
-						"Workers AI response was missing required fields"
-					);
-				}
-
-			} catch (error) {
-
-				// -----------------------------------------------------
-				// SAFE FALLBACK
-				// -----------------------------------------------------
-
-				// IMPORTANT:
-				//
-				// An AI failure does NOT change the actual
-				// security assessment.
-				//
-				// The deterministic result remains the source of truth.
-				console.error(
-					"Workers AI summary generation failed:",
-					error
-				);
-
-
-				parsedAI = {
-
-					riskSummary:
-						"AI risk summary could not be generated.",
-
-					potentialImpact:
-						"See the deterministic control result and supporting evidence.",
-
-					recommendedRemediation:
-						"Review and remediate the identified control exceptions.",
-				};
 			}
 
 
-			// -----------------------------------------------------
-			// STEP 12: CREATE SUMMARY TEXT FOR D1
-			// -----------------------------------------------------
+			if (
+				(finding as any).status ===
+				"RESOLVED"
+			) {
 
-			// D1 currently has one TEXT column called "summary".
-			//
-			// So we'll save the structured fields as nicely
-			// formatted text.
-			const aiSummaryText = [
-
-				`Risk Summary: ${parsedAI.riskSummary}`,
-
-				`Potential Impact: ${parsedAI.potentialImpact}`,
-
-				`Recommended Remediation: ${parsedAI.recommendedRemediation}`,
-
-			].join("\n\n");
+				return Response.json(
+					{
+						message:
+							"Finding is already resolved",
+						finding,
+					}
+				);
+			}
 
 
-			// -----------------------------------------------------
-			// STEP 13: SAVE AI SUMMARY INTO D1
-			// -----------------------------------------------------
+			const resolvedAt =
+				new Date().toISOString();
+
 
 			await env.controlwatch_db
 				.prepare(`
-					UPDATE assessments
-					SET summary = ?
+					UPDATE findings
+					SET
+						status = 'RESOLVED',
+						resolved_at = ?
 					WHERE id = ?
 				`)
 				.bind(
-					aiSummaryText,
-					assessmentId
+					resolvedAt,
+					findingId
 				)
 				.run();
 
 
-			// -----------------------------------------------------
-			// STEP 14: RETURN COMPLETE ASSESSMENT
-			// -----------------------------------------------------
-
 			return Response.json({
+				id:
+					findingId,
 
-				// Deterministic result.
-				...result,
+				status:
+					"RESOLVED",
 
-				assessmentId: assessmentId,
-
-				assessedAt: assessedAt,
-
-				evidenceKey: evidenceKey,
-
-
-				// Structured AI explanation.
-				aiSummary: {
-
-					riskSummary:
-						parsedAI.riskSummary,
-
-					potentialImpact:
-						parsedAI.potentialImpact,
-
-					recommendedRemediation:
-						parsedAI.recommendedRemediation,
-				},
-
-
-				savedToDatabase: true,
-
-				savedEvidenceToR2: true,
-
-				evidenceLinkedToAssessment: true,
-
-				aiSummarySavedToDatabase: true,
+				resolvedAt,
 			});
 		}
 
 
 		// ---------------------------------------------------------
-		// ROUTE 4: GET ALL FINDINGS
+		// ASSESSMENTS
 		// ---------------------------------------------------------
 
-		if (url.pathname === "/api/findings") {
+		if (
+			url.pathname ===
+			"/api/assessments"
+		) {
 
-			const query = await env.controlwatch_db
-				.prepare(`
-					SELECT *
-					FROM findings
-					ORDER BY id DESC
-				`)
-				.all();
+			const query =
+				await env.controlwatch_db
+					.prepare(`
+						SELECT *
+						FROM assessments
+						ORDER BY id DESC
+					`)
+					.all();
 
 
 			return Response.json(
@@ -496,40 +997,15 @@ The recommended remediation should directly address the identified exception.
 
 
 		// ---------------------------------------------------------
-		// ROUTE 5: GET ALL ASSESSMENTS
+		// EVIDENCE
 		// ---------------------------------------------------------
 
-		if (url.pathname === "/api/assessments") {
-
-			const query = await env.controlwatch_db
-				.prepare(`
-					SELECT *
-					FROM assessments
-					ORDER BY id DESC
-				`)
-				.all();
-
-
-			return Response.json(
-				query.results
-			);
-		}
-
-
-		// ---------------------------------------------------------
-		// ROUTE 6: GET EVIDENCE FROM R2
-		// ---------------------------------------------------------
-
-		// Example:
-		//
-		// /api/evidence/AC-001/assessment-10.json
 		if (
 			url.pathname.startsWith(
 				"/api/evidence/"
 			)
 		) {
 
-			// Convert the API path into an R2 object key.
 			const evidenceKey =
 				url.pathname.replace(
 					"/api/evidence/",
@@ -538,16 +1014,21 @@ The recommended remediation should directly address the identified exception.
 
 
 			const object =
-				await env.controlwatch_evidence.get(
-					evidenceKey
-				);
+				await env
+					.controlwatch_evidence
+					.get(
+						evidenceKey
+					);
 
 
-			if (object === null) {
+			if (
+				object === null
+			) {
 
 				return Response.json(
 					{
-						error: "Evidence not found",
+						error:
+							"Evidence not found",
 					},
 					{
 						status: 404,
@@ -573,10 +1054,13 @@ The recommended remediation should directly address the identified exception.
 
 
 		// ---------------------------------------------------------
-		// ROUTE 7: AI CONNECTION TEST
+		// AI CONNECTION TEST
 		// ---------------------------------------------------------
 
-		if (url.pathname === "/api/ai-test") {
+		if (
+			url.pathname ===
+			"/api/ai-test"
+		) {
 
 			const aiResponse =
 				await env.AI.run(
@@ -596,13 +1080,10 @@ The recommended remediation should directly address the identified exception.
 		}
 
 
-		// ---------------------------------------------------------
-		// ROUTE 8: NOT FOUND
-		// ---------------------------------------------------------
-
 		return Response.json(
 			{
-				error: "Route not found",
+				error:
+					"Route not found",
 			},
 			{
 				status: 404,

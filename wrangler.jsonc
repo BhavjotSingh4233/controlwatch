@@ -1,6 +1,5 @@
 /**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
+ * Cloudflare Worker configuration for ControlWatch
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
@@ -18,12 +17,12 @@
 		"nodejs_compat"
 	],
 
-	// Workers AI binding
-	// This lets our Worker access Workers AI through env.AI
+	// Workers AI
 	"ai": {
 		"binding": "AI"
 	},
 
+	// D1 database
 	"d1_databases": [
 		{
 			"binding": "controlwatch_db",
@@ -32,35 +31,24 @@
 		}
 	],
 
+	// R2 evidence storage
 	"r2_buckets": [
 		{
 			"bucket_name": "controlwatch-evidence",
 			"binding": "controlwatch_evidence"
 		}
-	]
+	],
 
-	/**
-	 * Smart Placement
-	 */
-	// "placement": { "mode": "smart" }
-
-	/**
-	 * Environment Variables
-	 */
-	// "vars": { "MY_VARIABLE": "production_value" }
-
-	/**
-	 * Static Assets
-	 */
-	// "assets": { "directory": "./public/", "binding": "ASSETS" }
-
-	/**
-	 * Service Bindings
-	 */
-	// "services": [
-	//   {
-	//     "binding": "MY_SERVICE",
-	//     "service": "my-service"
-	//   }
-	// ]
+	// Static dashboard files.
+	//
+	// Requests for /api/* go to index.ts first.
+	// Everything else, such as /, /style.css and /app.js,
+	// is served from the public folder.
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"run_worker_first": [
+			"/api/*"
+		]
+	}
 }
